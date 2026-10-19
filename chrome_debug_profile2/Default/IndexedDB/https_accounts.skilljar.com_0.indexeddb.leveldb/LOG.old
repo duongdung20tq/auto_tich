@@ -1,3 +1,0 @@
-2026/10/15-15:19:16.998 4908 Creating DB D:\Du_an_mini\auto_tich\chrome_debug_profile2\Default\IndexedDB\https_accounts.skilljar.com_0.indexeddb.leveldb since it was missing.
-2026/10/15-15:19:17.002 4908 Reusing MANIFEST D:\Du_an_mini\auto_tich\chrome_debug_profile2\Default\IndexedDB\https_accounts.skilljar.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/10/15-15:19:21.392 6358 Manual compaction at level-0 from '\x00\x01\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x02\x00\x00\x00' @ 0 : 0; will stop at (end)
