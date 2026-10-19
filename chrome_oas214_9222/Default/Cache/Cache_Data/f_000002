@@ -1,0 +1,1376 @@
+// =============================================================================
+// loginhelper.js  —  BẢN SỬA cho tính năng "Đăng nhập bằng Face ID" (spec 10.5)
+// -----------------------------------------------------------------------------
+// Đây là file phía WEB (OAS bi-security-login). Deploy bằng cách thay thế
+//   <OAS>/bi-security-login/js/loginhelper.js
+// Lưu trong repo main-mobile để đi kèm cặp với App.js (native bridge).
+//
+// KHÁC BIỆT so với bản OAS gốc — tất cả đánh dấu bằng "// [FaceID]":
+//   1. Định nghĩa window.khons MỘT LẦN, map mã trạng thái → thông báo Phụ lục 01.
+//   2. #loginBtn: đọc cờ window.__faceIdLogin (do native set) → BỎ QUA 2FA cho
+//      luồng Face ID (spec 10.5.2). Đổi mật khẩu (nếu cần) rồi vào thẳng.
+//   3. Xử lý "tài khoản đang đăng nhập ở thiết bị khác" (pop-up #10/#13).
+//   4. setup_sinhtrachoc gửi SAU khi login thành công (không lưu creds sai).
+//   5. .touch-id-Icons: preventDefault; không redefine window.khons.
+//   6. showToast hỗ trợ lại 3 loại: 'success' / 'warning' / true (bwd-compat).
+//   7. Khôi phục loading overlay (showLoading/hideLoading) quanh các lời gọi API.
+//
+// PHỤ THUỘC BACKEND (đội server cung cấp) — đánh dấu "// [BE]":
+//   - /auth/login trả thêm: passwordChangeRequired, otherDeviceLoggedIn
+//   - /auth/force-login (đăng xuất thiết bị cũ) — dùng khi NSD chọn
+//     "Tiếp tục đăng nhập".
+//   - Cho phép tạo phiên KHÔNG-2FA khi đăng nhập bằng Face ID.
+// =============================================================================
+
+//NOTE: require.js MUST BE LOADED IN PAGE ALREADY
+requirejs.config({
+  // Path mappings for the logical module names
+  paths: {
+    'knockout': 'js/libs/knockout/knockout-3.3.0',
+    'jquery': 'js/libs/jquery/jquery-2.1.3.min',
+    'jqueryui-amd': 'js/libs/jquery/jqueryui-amd-1.11.4.min',
+    'hammerjs': 'js/libs/hammer/hammer-2.0.4.min',
+    'ojs': 'js/libs/oj/v1.1.1/min',
+    'ojL10n': 'js/libs/oj/v1.1.1/ojL10n',
+    'alta': 'css/libs/oj/v1.1.1/alta',
+    'ojtranslations': 'js/libs/oj/v1.1.1/resources',
+  },
+  // Shim configurations for modules that do not expose AMD
+  shim: {
+    'jquery': {
+      exports: ['jQuery', '$']
+    }
+  },
+});
+const USE_LOCAL_API = false;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [API] Cấu hình theo môi trường — KHÔNG hardcode host/port riêng cho từng env.
+//
+// Service `identity-authenticator` deploy dạng WAR trên WebLogic, context-root
+// `/identity-authenticator`, CÙNG managed server phục vụ /analytics (cổng 7102).
+// Do đó trang login và API luôn CÙNG ORIGIN ⇒ base URL để RỖNG (relative):
+//   dev/test/uat nội bộ : http://<host>:7102/analytics/...  → API /identity-authenticator/...
+//   prod qua tên miền   : https://ioc.mof.gov.vn/...        → API /identity-authenticator/...
+// Không còn URL tuyệt đối ⇒ không mixed content (https→http), không CORS,
+// không phụ thuộc IP nội bộ (client mobile ngoài mạng không tới được IP private).
+//
+// CHỈ khi service chạy STANDALONE khác origin (dev máy cá nhân: java -jar, cổng
+// 8001) mới cần trỏ đi nơi khác — khai báo TRƯỚC khi nạp file này, trong login.jsp:
+//   <script>window.__IA_API_ORIGIN__ = 'http://localhost:8001';</script>
+// (khi đó BE phải bật CORS cho origin của trang).
+//
+// [F5] Qua TÊN MIỀN thì request đi F5(ASM) → OHS → WLS. ASM chặn URI có ≥4 đoạn
+// path: verify 2026-08-05 `/identity-authenticator/auth/config/detail` → HTTP 200
+// + HTML "Request Rejected", Support ID 9878758138658642663. Nên 6 endpoint "sâu"
+// phải gọi qua alias 3 đoạn mà OHS đã ProxyPass về path thật:
+//   /identity-authenticator/cfg      → .../auth/config
+//   /identity-authenticator/reset2fa → .../auth/reset-2fa
+// Vào THẲNG WLS bằng IP:7102 thì không có F5/OHS ⇒ phải gọi path thật.
+// Xem memory prod-waf-blocks-mainmobile.
+// ─────────────────────────────────────────────────────────────────────────────
+const API_CTX    = '/identity-authenticator';
+const API_ORIGIN = (typeof window !== 'undefined' && window.__IA_API_ORIGIN__) || '';  // '' = same-origin
+// Có F5+OHS ở giữa khi trang mở bằng TÊN MIỀN (không phải IP/localhost) và không override origin.
+const VIA_GATEWAY = !API_ORIGIN && !/^(\d{1,3}\.){3}\d{1,3}$|^localhost$/i.test(location.hostname);
+const F5_DEEP_ALIAS = {                    // phải khớp ProxyPass trên OHS
+  '/auth/config/detail':            '/cfg/detail',
+  '/auth/config/change-status':     '/cfg/change-status',
+  '/auth/reset-2fa/verify-account': '/reset2fa/verify-account',
+  '/auth/reset-2fa/verify-otp':     '/reset2fa/verify-otp',
+  '/auth/reset-2fa/resend-otp':     '/reset2fa/resend-otp',
+  '/auth/reset-2fa/enable':         '/reset2fa/enable',
+};
+// path dạng '/auth/login' hoặc '/auth/status?uc=abc' (query giữ nguyên, không tính vào số đoạn).
+function apiUrl(path) {
+  const i   = path.indexOf('?');
+  const p0  = i === -1 ? path : path.slice(0, i);
+  const qs  = i === -1 ? ''   : path.slice(i);
+  const p   = VIA_GATEWAY ? (F5_DEEP_ALIAS[p0] || p0) : p0;
+  return `${API_ORIGIN}${API_CTX}${p}${qs}`;
+}
+
+// [API] MỌI lời gọi API phải đi qua hàm này. Lý do: F5 trả HTTP **200 + HTML**
+// ("Request Rejected") còn OHS trả 503/404 HTML khi backend chưa lên — cả hai đều
+// lọt qua `if (!res.ok)` và làm `res.json()` ném SyntaxError, hiện lên UI thành
+// banner "Unexpected token '<'" (bug đã gặp trên app mobile prod). Ở đây kiểm
+// content-type trước khi parse và bóc Support ID để đối chiếu ASM log.
+async function fetchJson(path, opts) {
+  const url = apiUrl(path);
+  const res = await fetch(url, opts);
+  const ct  = (res.headers.get('content-type') || '').toLowerCase();
+  if (ct.indexOf('application/json') === -1) {
+    const body = await res.text().catch(function () { return ''; });
+    const m    = body.match(/support ID is:\s*([0-9]+)/i) || body.match(/Support ID:\s*([0-9]+)/i);
+    const sid  = m ? m[1] : '';
+    console.error('[api] phản hồi không phải JSON:', res.status, url,
+      sid ? 'SupportID=' + sid : body.slice(0, 200));
+    const err = new Error(sid
+      ? MESSAGES.API_REJECTED + ' (Support ID ' + sid + ')'
+      : MESSAGES.API_UNAVAILABLE);
+    err.httpStatus = res.status;
+    err.supportId  = sid;
+    throw err;
+  }
+  return res.json();
+}
+
+// [FaceID] Nội dung thông báo — Phụ lục 01 (chỉ các mục liên quan luồng đăng nhập / Face ID).
+var MESSAGES = {
+  // [API] Lỗi tầng hạ tầng (F5 chặn / backend chưa lên) — không phải lỗi nghiệp vụ.
+  API_REJECTED: 'Yêu cầu bị hệ thống bảo vệ từ chối. Vui lòng liên hệ quản trị hệ thống',
+  API_UNAVAILABLE: 'Hệ thống tạm thời không phản hồi. Vui lòng thử lại sau',
+  LOGIN_WRONG: 'Tên đăng nhập hoặc mật khẩu không đúng. Vui lòng thử lại',                 // #1
+  CHANGE_PW_EMPTY: 'Vui lòng nhập mật khẩu mới',                                            // #5
+  CHANGE_PW_POLICY: 'Mật khẩu chưa đáp ứng đủ yêu cầu',                                     // #6
+  CHANGE_PW_CONFIRM_EMPTY: 'Vui lòng xác nhận mật khẩu mới',
+  CHANGE_PW_MISMATCH: 'Mật khẩu không trùng với mật khẩu mới',                              // #7
+  CHANGE_PW_SUCCESS: 'Đổi mật khẩu thành công.',                                            // #8
+  OTP_WRONG: 'Mã xác thực không đúng hoặc đã hết hạn. Vui lòng thử lại.',                   // #9/#12
+  OTHER_DEVICE_TITLE: 'Đổi thiết bị đăng nhập?',                                            // #10/#13
+  OTHER_DEVICE_BODY: 'Tài khoản đang đăng nhập trên thiết bị khác. Nếu tiếp tục, tài khoản trên thiết bị cũ sẽ bị đăng xuất.',
+  OTHER_DEVICE_OK: 'Tiếp tục đăng nhập',
+  OTHER_DEVICE_CANCEL: 'Hủy',
+  // Face ID — chọn/đăng nhập (registerServerFingerStatus). #26, #35-#42
+  FID_NOT_SETUP: 'Đăng nhập bằng Face ID chưa được thiết lập trên thiết bị này.',           // #35
+  FID_NO_SUPPORT: 'Thiết bị hiện tại không hỗ trợ xác thực sinh trắc học.',                 // #36
+  FID_NO_PERMISSION: 'Ứng dụng chưa được cấp quyền sử dụng xác thực sinh trắc học. Vui lòng cấp quyền trong phần Cài đặt thiết bị.', // #37
+  FID_NOT_ENROLLED: 'Vui lòng thiết lập Face ID trên thiết bị trước khi sử dụng tính năng này.', // #26
+  FID_FAILED: 'Không thể xác thực khuôn mặt. Vui lòng thử lại.',                            // #38
+  FID_SENSOR: 'Tạm thời không thể sử dụng xác thực khuôn mặt. Vui lòng thử lại sau.',       // #39
+  FID_ERROR: 'Không thể thực hiện xác thực Face ID lúc này. Vui lòng thử lại sau.',         // #40
+  FID_CHANGED: 'Face ID trên thiết bị đã thay đổi. Vui lòng đăng nhập lại để kích hoạt lại Face ID.', // #41
+  FID_LOCKED: 'Face ID đã tạm thời bị khóa do xác thực thất bại nhiều lần.',                // #42
+  FID_ACCOUNT_MISMATCH: 'Face ID chưa được bật cho tài khoản đang nhập. Vui lòng đăng nhập bằng mật khẩu.',
+  FID_STALE: 'Đăng nhập bằng Face ID đã hết hiệu lực (có thể do mật khẩu đã thay đổi). Vui lòng đăng nhập bằng mật khẩu và bật lại Face ID.',
+  FID_DISABLED: 'Đăng nhập bằng Face ID đã bị tắt cho tài khoản này. Vui lòng đăng nhập bằng mật khẩu và bật lại Face ID.',
+  // [AccountStatus] Cảnh báo trạng thái tài khoản sau khi login thành công (/auth/account-status).
+  ACC_NOT_EXIST: 'Tài khoản không tồn tại',
+  ACC_NOT_ACTIVE: 'Tài khoản chưa được active',
+  ACC_DISABLED: 'Tài khoản không khả dụng',
+  ACC_LOCKED: 'Tài khoản đã bị khóa',
+  ACC_EXPIRED: 'Tài khoản đã hết hạn',
+  ACC_PWD_EXPIRED: 'Mật khẩu đã hết hạn',
+};
+
+//Add 'bitechLogin' namespace to window so .jsp pages can setup login CSS and HTML
+if (window.bitechLogin == undefined) {
+  console.log('bitechLogin');
+  window.bitechLogin = {};
+}
+
+var bitechLogin = window.bitechLogin;
+var getParameter = function (parameterName) {
+  if (window.requestParameters === undefined) {
+    window.requestParameters = {};
+    var queryString = window.location.search.substring(1);
+
+    if (queryString.length > 0) {
+      if (parameterName === "redirect") {
+        var value = queryString.substring(9); //index after "redirect="
+        window.requestParameters[parameterName] = value;
+      } else {
+        var i, pairs = queryString.split('&');
+
+        for (i = 0; i < pairs.length; i++) {
+          var pair = pairs[i].split('=');
+          var key = pair[0].toLowerCase();
+          var value = decodeURIComponent(pair[1].replace(/\+/g, " "));
+
+          if (window.requestParameters[key]) {
+            var tempValue = window.requestParameters[key];
+
+            if (typeof tempValue === 'string') {
+              window.requestParameters[key] = [];
+              window.requestParameters[key].push(tempValue);
+            }
+
+            window.requestParameters[key].push(value);
+          } else {
+            window.requestParameters[key] = value;
+          }
+        }
+      }
+    }
+  }
+
+  return window.requestParameters[parameterName.toLowerCase()];
+};
+
+// [Fix redirect] Dich de LAY LAI tham so redirect hop le khi trang login thieu no.
+//
+// KHONG dung '/analytics': do duoc trong browser that -> khi trinh duyet CON COOKIE cua OAS ma
+// phien BI da chet, GET /analytics tra HTTP 200 trang "You are not currently signed in" (be tac,
+// khong bat ve trang login). Cung URL do neu KHONG gui cookie thi tra 302 ve trang login:
+//     fetch('/analytics/saw.dll?bieehome&startPage=1', {credentials:'include'}) -> 200
+//     fetch(...,                                       {credentials:'omit'})    -> 302
+// Link "here" tren trang be tac cua Oracle tro ve saw.dll?BIEEHome -> quay lai chinh no.
+//
+// /bi-security-login/logout xoa phien roi LUON ve login.jsp?...&redirect=<base64 hop le>,
+// nen dung lam dich bounce thi vua lay duoc redirect vua tu phuc hoi trang thai be tac.
+var OAS_ENTRY_PATH = '/bi-security-login/logout';
+// [Review] Trang trình diễn tĩnh cho tài khoản đánh giá store (Google Play / App Store).
+// Dựng từ API_CTX để đúng ở mọi môi trường (same-origin qua tên miền, hoặc __IA_API_ORIGIN__ khi
+// chạy FE cục bộ). Đúng 3 đoạn path dưới tên miền — /identity-authenticator/demo/index.html — nên
+// KHÔNG dính rule F5 chặn URI từ 4 đoạn (xem đầu file).
+var REVIEW_DEMO_PATH = '/demo/index.html';
+function reviewDemoUrl() {
+  return API_ORIGIN + API_CTX + REVIEW_DEMO_PATH;
+}
+
+// [Review] Bật sẵn đăng nhập sinh trắc cho tài khoản đánh giá store, rồi mới sang trang trình diễn.
+//
+// Dùng action 'enable_faceid', KHÔNG dùng 'setup_sinhtrachoc':
+//   - enable_faceid bắt quét sinh trắc để xác nhận rồi mới lưu credential → giữ đúng mô hình đồng
+//     thuận của app ("chủ máy đồng ý mới gắn credential"), và reviewer thấy ngay prompt native.
+//   - setup_sinhtrachoc lưu IM LẶNG, lại gọi về registerServerFingerStatus(true) mà nhánh `true`
+//     map thành toast "chưa thiết lập" — tức là hiện một thông báo SAI.
+//
+// LUÔN đi tiếp sang trang demo, dù bật được hay không:
+//   - máy reviewer có thể không có hoặc chưa đăng ký sinh trắc → trả NO_FACEID / NOT_ENROLLED;
+//   - bản app CŨ chưa có handler 'enable_faceid' sẽ không gọi lại gì cả → bắt buộc phải có watchdog,
+//     nếu không reviewer kẹt vĩnh viễn ở màn đăng nhập. Đây là lỗi đắt nhất có thể xảy ra ở đây.
+// Không hiện toast lỗi cho tài khoản đánh giá: một thông báo lỗi giữa vòng review đắt hơn nhiều so
+// với việc lặng lẽ bỏ qua một tính năng phụ.
+function preEnableBiometricThenGoToDemo(uc) {
+  return new Promise(function (resolve) {
+    var timer;
+    var done = false;
+    var go = function () {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      // Native có thể trả lời MUỘN, sau khi đã sang trang demo (trang đó không định nghĩa khons)
+      // → để lại một no-op cho lần gọi muộn khỏi ném lỗi.
+      window.khons.onEnableFaceidResult = function () {};
+      window.location.replace(reviewDemoUrl());
+      resolve();
+    };
+
+    window.khons = window.khons || {};
+
+    // Mở ngoài app (trình duyệt thường): không có cầu native, đi thẳng.
+    if (!window.ReactNativeWebView) { go(); return; }
+
+    var pwdEl = document.getElementById('idPassword');
+    var pwd = pwdEl ? pwdEl.value : '';
+    if (!pwd) { go(); return; }        // đăng nhập bằng Face ID sẵn có → không cần bật lại
+
+    window.khons.onEnableFaceidResult = function (code) {
+      console.log('[review] enable_faceid:', code);   // ENABLED | NO_FACEID | NOT_ENROLLED | CANCELLED…
+      go();
+    };
+    // 20s: đủ rộng cho một lượt quét sinh trắc của người dùng, mà vẫn không kẹt vô hạn.
+    timer = setTimeout(go, 20000);
+    _sendNative('enable_faceid', { username: uc, password: pwd });
+  });
+}
+var _BOUNCE_FLAG = 'oasRedirectBounced';
+
+// [Fix redirect] Lay NGUYEN VAN gia tri cua tham so "redirect", cat tai '&' dau tien.
+//
+// KHONG dung URLSearchParams.get('redirect'): ham do decode %xx va doi '+' thanh ' ',
+// lam sai tham so hash ma OAS da ky.
+//
+// KHONG lay den het query string (nhu ban OOTB getParameter() o tren, va nhu v3 truoc day):
+// gia tri redirect cua OAS luon la base64 nen KHONG BAO GIO chua '&', trong khi co nhung
+// duong sinh ra URL co tham so DUNG SAU redirect:
+//   - LoginServlet khi xac thuc that bai: login-failed.jsp?...&redirect=<R>&useProfileSetting=false&lang=en
+//   - switchLangParam() (cuoi file) noi '&lang=xx' vao URL hien tai khi doi ngon ngu
+// Do thuc te: gui j_redirect = <R> + '&lang=en' -> HTTP 400 "The redirect URL is not valid!".
+function getRawRedirectParam() {
+  var qs = window.location.search.substring(1);
+  var m = /(?:^|&)redirect=([^&]*)/.exec(qs);
+  return (m && m[1]) ? m[1] : null;
+}
+
+// Buoc cuoi cua moi luong FE: submit #loginForm.
+// POST /bi-security-login/login la buoc DUY NHAT tao phien OAS/WebLogic
+// (container xac thuc j_username/j_password) -> KHONG BAO GIO duoc bo qua buoc submit nay.
+//
+// Quy tac gan j_redirect - do thuc te tren 10.15.119.111:7102 (POST voi user khong ton tai):
+//   | j_redirect                                  | LoginServlet tra ve                     |
+//   |---------------------------------------------|-----------------------------------------|
+//   | redirect that tu URL (co hash OAS ky)       | 302 -> di tiep buoc xac thuc            |
+//   | RONG / khong gui                            | 302 -> di tiep buoc xac thuc            |
+//   | base64 tu tao, khong co hash                | 400 "The redirect URL is not valid!"    |
+//   | hash cu (hardcode trong login.jsp truoc day)| 400 "The redirect URL is not valid!"    |
+// => Chi co 2 gia tri dung duoc: chuoi redirect that, hoac RONG. Kiem tra nay chay TRUOC
+//    khi xac thuc, nen gui sai la mat luon phien dang nhap.
+//
+// LICH SU:
+//   v1: thieu redirect -> dieu huong /analytics roi RETURN => khong submit => khong co phien
+//       => analytics bao "You are not currently signed in". Da bo.
+//   v2: thieu redirect -> gui base64 tu tao => 400 "The redirect URL is not valid!". Da bo.
+function redirectAfter2FA() {
+  var redirectParam = getRawRedirectParam();
+  var redirectInput = document.querySelector('input[name="j_redirect"]');
+
+  if (!redirectParam) {
+    console.warn('redirectAfter2FA: thieu tham so "redirect" tren URL -> gui j_redirect rong');
+  }
+
+  if (redirectInput) {
+    // Co redirect: truyen lai NGUYEN VEN (khong decode/encode lai). Khong co: gui rong.
+    redirectInput.value = redirectParam || '';
+  }
+
+  $('#loginForm').submit();
+}
+
+// [Fix redirect] Bao dam trang login luon co tham so "redirect" hop le.
+// Da kiem chung: GET /analytics -> 302 -> /bi-security-login/login.jsp?msi=false&mt=false
+// &profileMust=true&redirect=<base64 co hash>. Nen khi trang login duoc mo TRUC TIEP
+// (khong co redirect), di qua OAS_ENTRY_PATH mot lan de OAS cap redirect moi roi bat ve day.
+// Co co sessionStorage chong lap vo han khi OAS khong bat ve (moi truong cau hinh khac).
+function ensureRedirectParam() {
+  if (!document.getElementById('loginForm')) {
+    return;                                   // khong phai trang login -> khong lam gi
+  }
+  if (getRawRedirectParam()) {
+    try { sessionStorage.removeItem(_BOUNCE_FLAG); } catch (e) { /* private mode */ }
+    return;
+  }
+  var bounced = '1';
+  try { bounced = sessionStorage.getItem(_BOUNCE_FLAG); } catch (e) { /* private mode */ }
+  if (bounced) {
+    console.warn('ensureRedirectParam: da thu qua ' + OAS_ENTRY_PATH
+      + ' nhung van thieu tham so redirect -> giu nguyen trang login');
+    return;
+  }
+  try { sessionStorage.setItem(_BOUNCE_FLAG, '1'); } catch (e) { /* private mode */ }
+  console.warn('ensureRedirectParam: thieu tham so redirect -> di qua ' + OAS_ENTRY_PATH
+    + ' de OAS cap redirect moi');
+  window.location.replace(OAS_ENTRY_PATH);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', ensureRedirectParam);
+} else {
+  ensureRedirectParam();
+}
+
+// Gửi message tới native. Dùng cho việc cập nhật credential IM LẶNG khi đổi mật khẩu
+// ngay sau khi đã đăng nhập bằng Face ID (giữ token_khonsnn khớp mật khẩu mới).
+// BẬT/TẮT Face ID được quản lý ở TRANG CHỦ qua nút gạt (user.js + faceid-bridge.js), không ở trang login.
+function _sendNative(action, extra) {
+  if (window.ReactNativeWebView) {
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      result: 'OK', data: Object.assign({ action: action }, extra || {})
+    }));
+  }
+}
+
+// Check cấu hình Face ID còn BẬT không — dùng endpoint READ-ONLY sẵn có (config/detail),
+// Có timeout; lỗi/timeout → fail-open (coi như còn bật, không khoá người dùng). Trả Promise<boolean>.
+function isFaceIdEnabledOnServer(uc) {
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, 4000);
+  return fetchJson(`/auth/config/detail?uc=${encodeURIComponent(uc)}`, {
+    headers: { 'Accept': 'application/json' },
+    signal: ctrl.signal
+  })
+    .then(function (d) {
+      clearTimeout(timer);
+      // Chỉ coi là TẮT khi BE trả rõ ràng faceIdEnabled === false. Còn lại → cho qua.
+      return !(d && d.code === '00' && d.data && d.data.faceIdEnabled === false);
+    })
+    .catch(function () { clearTimeout(timer); return true; });
+}
+
+// [AccountStatus] GET /auth/status?uc=... — luồng setup 2FA có đang bật cho tài khoản không (is2FAEnabled).
+function getAuthStatus(uc) {
+  return fetchJson(`/auth/status?uc=${encodeURIComponent(uc)}`, {
+    headers: { 'Accept': 'application/json' }
+  });
+}
+
+// [AccountStatus] GET /auth/account-status?uc=... — trạng thái tài khoản (khóa/hết hạn/đổi mật khẩu...).
+function getAccountStatus(uc) {
+  return fetchJson(`/auth/account-status?uc=${encodeURIComponent(uc)}`, {
+    headers: { 'Accept': 'application/json' }
+  });
+}
+
+// Loading overlay với counter để tránh ẩn overlay
+// sớm khi có nhiều lời gọi API chạy song song/lồng nhau.
+var _loadingCounter = 0;
+
+function showLoading() {
+  _loadingCounter++;
+  var overlay = document.getElementById('login-loading-overlay');
+  if (overlay) overlay.hidden = false;
+}
+
+function hideLoading() {
+  _loadingCounter = Math.max(0, _loadingCounter - 1);
+  if (_loadingCounter === 0) {
+    var overlay = document.getElementById('login-loading-overlay');
+    if (overlay) overlay.hidden = true;
+  }
+}
+
+// [Toast] Dùng module Toast chung (btc-fe/packages/static-resource/assets/modules/toast).
+// Giữ lại showToast(msg, type) làm shim mỏng để không phải sửa mọi nơi gọi trong file này.
+// type: 'success' / 'warning' / 'error' / true (bwd-compat, coi như 'success'); không truyền → 'error'.
+function showToast(msg, type) {
+  if (type === true) type = 'success'; // backward compatibility
+  Toast.show(msg, type || 'error');
+}
+
+// [FaceID] Modal 1 nút (thông báo) — dùng #thongBaoSinhTracHoc có sẵn trong login.jsp.
+function showModalMessage(html) {
+  $("#thongBaoSinhTracHoc #conf-3").html(html);
+  $("#thongBaoSinhTracHoc .nut").html('<a href="#" class="luu" id="sure-do">Xác nhận</a>');
+  $("#thongBaoSinhTracHoc .nut .luu").off('click').on('click', function (e) {
+    e.preventDefault();
+    $('#thongBaoSinhTracHoc').removeClass('show-modal');
+  });
+  $('#thongBaoSinhTracHoc').addClass('show-modal');
+}
+
+// [FaceID] Modal xác nhận 2 nút (pop-up #10/#13: đổi thiết bị đăng nhập).
+function showConfirmModal(title, body, okText, cancelText, onOk, onCancel) {
+  var html = (title ? '<strong>' + title + '</strong><br>' : '') + body;
+  $("#thongBaoSinhTracHoc #conf-3").html(html);
+  var $nut = $("#thongBaoSinhTracHoc .nut").empty();
+  var $cancel = $('<a href="#" class="luu" style="background:#fff;color:#1378C8 !important;border-color:#1378C8;">' + cancelText + '</a>');
+  var $ok = $('<a href="#" class="luu">' + okText + '</a>');
+  $cancel.on('click', function (e) {
+    e.preventDefault();
+    $('#thongBaoSinhTracHoc').removeClass('show-modal');
+    if (onCancel) onCancel();
+  });
+  $ok.on('click', function (e) {
+    e.preventDefault();
+    $('#thongBaoSinhTracHoc').removeClass('show-modal');
+    if (onOk) onOk();
+  });
+  $nut.append($cancel).append($ok);
+  $('#thongBaoSinhTracHoc').addClass('show-modal');
+}
+
+async function enable2FA() {
+  const data = await fetchJson(
+    '/auth/enable-2fa',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({
+        uc: document.getElementById('idUser').value,
+        code: document.getElementById('setup-otp-input').value,
+      })
+    }
+  );
+
+  // [Fix check-code] BE tra ApiResponse{code,message,data}: loi = code '01' (kem HTTP 400),
+  // khong co field "error". Check data.error luon false -> truoc day loi van di tiep
+  // sang redirectAfter2FA() va nguoi dung nhan thong bao redirect thay vi loi thuc.
+  if (data.code !== '00') {
+    showModalMessage(data.message || MESSAGES.OTP_WRONG);
+  } else {
+    redirectAfter2FA();
+  }
+}
+
+async function toggle2FA() {
+  const data = await fetchJson(
+    '/auth/toggle-2fa-status',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({
+        uc: document.getElementById('idUser').value,
+        isEnabled: false,
+        password: document.getElementById('idPassword').value,
+      })
+    }
+  );
+
+  // [Fix check-code] xem giai thich o enable2FA().
+  if (data.code !== '00') {
+    showModalMessage(data.message);
+  } else {
+    redirectAfter2FA();
+  }
+}
+
+async function verify2FA() {
+  const code = Array.from(document.querySelectorAll('.otp-cell'))
+    .map(function (el) { return el.value; })
+    .join('');
+
+  const data = await fetchJson(
+    '/auth/verify-2fa',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({
+        uc: document.getElementById('idUser').value,
+        code: code,
+      })
+    }
+  );
+
+  if (data.code === "01") {
+    var errEl = document.getElementById('verify-otp-error');
+    if (errEl) { errEl.textContent = data.message || MESSAGES.OTP_WRONG; errEl.hidden = false; }
+  } else {
+    redirectAfter2FA();
+  }
+}
+
+async function sendForgotPwd(username, email) {
+  return await fetchJson(
+    '/auth/forgot-password',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ username: username, email: email })
+    }
+  );
+}
+
+// [FaceID][BE] Đăng xuất thiết bị cũ rồi tiếp tục đăng nhập trên thiết bị hiện tại.
+async function forceLoginNewDevice(uc) {
+  return await fetchJson('/auth/force-login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+    body: JSON.stringify({ uc: uc })
+  });
+}
+
+var _otpCountdownTimer = null;
+
+function startOtpCountdown() {
+  clearInterval(_otpCountdownTimer);
+  var secondsEl = document.getElementById('verify-otp-seconds');
+  var prevWindow = Math.floor(Date.now() / 1000 / 30);
+
+  function tick() {
+    var now = Math.floor(Date.now() / 1000);
+    var remaining = 30 - (now % 30);
+    if (secondsEl) secondsEl.textContent = remaining;
+
+    var currentWindow = Math.floor(now / 30);
+    if (currentWindow !== prevWindow) {
+      prevWindow = currentWindow;
+      $('#verify-2fa-card .otp-cell').val('');
+      document.querySelector('#verify-2fa-card .otp-cell').focus();
+    }
+  }
+
+  tick();
+  _otpCountdownTimer = setInterval(tick, 1000);
+}
+
+var _resetOtpCountdownTimer = null;
+
+function startResetOtpCountdown(totalSeconds) {
+  clearInterval(_resetOtpCountdownTimer);
+  var secondsEl = document.getElementById('reset-2fa-otp-seconds');
+  var countdownEl = document.getElementById('reset-2fa-otp-countdown');
+  var remaining = totalSeconds;
+
+  function tick() {
+    if (secondsEl) secondsEl.textContent = remaining;
+    if (remaining <= 0) {
+      clearInterval(_resetOtpCountdownTimer);
+      if (countdownEl) countdownEl.textContent = 'Mã OTP đã hết hạn, vui lòng thử lại';
+      return;
+    }
+    remaining--;
+  }
+
+  tick();
+  _resetOtpCountdownTimer = setInterval(tick, 1000);
+}
+
+bitechLogin.setup = function (elContainer, oOptions) {
+
+  async function login(uc, password) {
+    return await fetchJson('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({
+        uc: uc !== undefined ? uc : document.getElementById('idUser').value,
+        password: password !== undefined ? password : document.getElementById('idPassword').value
+      })
+    });
+  }
+
+  async function verifyAccount(username, password) {
+    return await fetchJson('/auth/reset-2fa/verify-account', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ username: username, password: password })
+    });
+  }
+
+  async function verifyOTP(resetToken, otp) {
+    return await fetchJson('/auth/reset-2fa/verify-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ resetToken: resetToken, otpCode: otp })
+    });
+  }
+
+  async function resendOTP(resetToken) {
+    return await fetchJson('/auth/reset-2fa/resend-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ resetToken: resetToken })
+    });
+  }
+
+  async function enableReset2FA(resetToken, code) {
+    return await fetchJson('/auth/reset-2fa/enable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ resetToken: resetToken, code: code })
+    });
+  }
+
+  async function setup2FA(uc) {
+    return await fetchJson('/auth/setup-2fa', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8', 'Accept': 'application/json' },
+      body: JSON.stringify({ uc: uc, password: document.getElementById('idPassword').value })
+    });
+  }
+
+  async function changePassword(userName, oldPwd, newPwd) {
+    return await fetchJson('/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8', 'Accept': 'application/json' },
+      body: JSON.stringify({ username: userName, oldPassword: oldPwd, newPassword: newPwd })
+    });
+  }
+
+  async function _renderLoginPage(elContainer, bIsTouchLayout, messages, aLanguageOptions, redirectURL, displaysikey) {
+    var _pendingUc = null;
+    var _reset2FAUc = null;
+    var _reset2FAPwd = null;
+    var _reset2FAResetToken = null;
+    var _isReset2FAFlow = false;
+    var _faceIdFlow = false;              // [FaceID] đánh dấu luồng đăng nhập bằng Face ID (để bỏ 2FA)
+    var SETUP_2FA_TITLE_DEFAULT = 'Thiết lập xác thực hai lớp';
+    var SETUP_2FA_TITLE_RESET = 'Thiết lập lại xác thực 2 lớp';
+
+    // [FaceID] Định nghĩa window.khons MỘT LẦN. Native gọi hàm này để báo trạng thái Face ID.
+    window.khons = {
+      registerServerFingerStatus: function (status) {
+        console.log('registerServerFingerStatus:', status);
+        switch (status) {
+          case true:                 showToast(MESSAGES.FID_NOT_SETUP, 'warning'); break;   // chưa có creds → chưa thiết lập
+          case 'NO_FACEID':          showToast(MESSAGES.FID_NO_SUPPORT, 'warning'); break;
+          case 'NO_PERMISSION':      showToast(MESSAGES.FID_NO_PERMISSION, 'warning'); break;
+          case 'NOT_ENROLLED':       showToast(MESSAGES.FID_NOT_ENROLLED, 'warning'); break;
+          case 'AUTH_FAILED':        showToast(MESSAGES.FID_FAILED, 'warning'); break;
+          case 'SENSOR_ERROR':       showToast(MESSAGES.FID_SENSOR, 'warning'); break;
+          case 'AUTH_LOCKED':        showToast(MESSAGES.FID_LOCKED, 'warning'); break;
+          case 'BIOMETRIC_CHANGED':  showToast(MESSAGES.FID_CHANGED, 'warning'); break;
+          case 'AUTH_ERROR':         showToast(MESSAGES.FID_ERROR, 'warning'); break;
+          case 'ACCOUNT_MISMATCH':   showToast(MESSAGES.FID_ACCOUNT_MISMATCH, 'warning'); break;
+          default: /* false / hủy → không hiển thị */ break;
+        }
+      }
+    };
+
+    $("#setup-2fa-form").on("submit", async function (event) {
+      event.preventDefault();
+      showLoading();
+      try {
+        if (_isReset2FAFlow) {
+          var code = document.getElementById('setup-otp-input').value;
+          var result = await enableReset2FA(_reset2FAResetToken, code);
+          if (result.code !== '00') {
+            showModalMessage(result.message || MESSAGES.OTP_WRONG);
+          } else {
+            redirectAfter2FA();
+          }
+        } else {
+          await enable2FA();
+        }
+      } catch (err) {
+        showToast('Đã có lỗi xảy ra, vui lòng thử lại');
+      } finally {
+        hideLoading();
+      }
+    });
+
+    $("#setup-2fa-back-link").on("click", function (event) {
+      event.preventDefault();
+      if (_isReset2FAFlow) {
+        _isReset2FAFlow = false;
+        document.getElementById('setup-2fa-title').textContent = SETUP_2FA_TITLE_DEFAULT;
+        document.getElementById('idUser').value = '';
+        document.getElementById('idPassword').value = '';
+        _reset2FAPwd = null;
+      }
+      document.getElementById('setup-2fa-card').setAttribute('hidden', '');
+      $('#login-card').show();
+    });
+
+    // Eye toggle helper
+    function setupEyeToggle(btnId, inputEl) {
+      var btn = document.getElementById(btnId);
+      if (!btn || !inputEl) return;
+      btn.addEventListener('click', function () {
+        var isPassword = inputEl.type === 'password';
+        inputEl.type = isPassword ? 'text' : 'password';
+        btn.querySelector('.icon-eye-on').style.display = isPassword ? 'none' : '';
+        btn.querySelector('.icon-eye-off').style.display = isPassword ? '' : 'none';
+      });
+    }
+
+    var changeNewPwInput = document.getElementById('change-new-password');
+    var changeConfirmPwInput = document.getElementById('change-confirm-password');
+    setupEyeToggle('toggle-change-new-pw', changeNewPwInput);
+    setupEyeToggle('toggle-change-confirm-pw', changeConfirmPwInput);
+
+    var resetPwInput = document.getElementById('reset-2fa-password');
+    setupEyeToggle('toggle-reset-2fa-pw', resetPwInput);
+
+    document.getElementById('setup-2fa-link').addEventListener('click', function (event) {
+      event.preventDefault();
+      $('#login-card').hide();
+      document.getElementById('reset-2fa-card').removeAttribute('hidden');
+    });
+
+    function backToLoginFromReset2FA() {
+      document.getElementById('reset-2fa-card').setAttribute('hidden', '');
+      document.getElementById('reset-2fa-form').reset();
+      $('#login-card').show();
+    }
+
+    document.getElementById('reset-2fa-back-arrow').addEventListener('click', function (event) {
+      event.preventDefault();
+      backToLoginFromReset2FA();
+    });
+
+    document.getElementById('reset-2fa-back-link').addEventListener('click', function (event) {
+      event.preventDefault();
+      backToLoginFromReset2FA();
+    });
+
+    $("#reset-2fa-form").on("submit", async function (event) {
+      event.preventDefault();
+      var usernameEl = document.getElementById('reset-2fa-username');
+      var passwordEl = document.getElementById('reset-2fa-password');
+      var errEl = document.getElementById('reset-2fa-error');
+
+      errEl.hidden = true; errEl.textContent = '';
+      usernameEl.classList.remove('input-error');
+      passwordEl.classList.remove('input-error');
+
+      // Chuẩn hoá giống #loginBtn (trim + lowercase) — nếu không, _reset2FAUc giữ nguyên case
+      // gốc và sẽ được gán thẳng vào j_username khi redirectAfter2FA() submit #loginForm,
+      // có thể lệch case với tài khoản thật ở OAS → xác thực thất bại → login-failed.jsp.
+      var uc = (usernameEl.value || '').trim().toLowerCase();
+      var pwd = passwordEl.value || '';
+
+      var contentErr = '';
+      if (uc === '') { contentErr = 'Tên đăng nhập'; }
+      if (pwd === '') { contentErr = contentErr ? contentErr + ', mật khẩu' : 'Mật khẩu'; }
+      if (contentErr !== '') {
+        errEl.textContent = contentErr + ' không được để trống!';
+        errEl.hidden = false;
+        if (uc === '') usernameEl.classList.add('input-error');
+        if (pwd === '') passwordEl.classList.add('input-error');
+        return;
+      }
+
+      showLoading();
+      try {
+        var verifyResult = await verifyAccount(uc, pwd);
+        if (verifyResult.code !== '00') {
+          errEl.textContent = verifyResult.message || MESSAGES.LOGIN_WRONG;
+          errEl.hidden = false;
+          usernameEl.classList.add('input-error');
+          passwordEl.classList.add('input-error');
+        } else {
+          _reset2FAUc = uc;
+          _reset2FAPwd = pwd;
+          _reset2FAResetToken = verifyResult.data.resetToken;
+
+          document.getElementById('reset-2fa-otp-email').textContent = verifyResult.data.maskedEmail || '';
+          $('#reset-2fa-otp-card .otp-cell').val('');
+          document.getElementById('reset-2fa-otp-error').hidden = true;
+
+          document.getElementById('reset-2fa-card').setAttribute('hidden', '');
+          document.getElementById('reset-2fa-otp-card').removeAttribute('hidden');
+          document.querySelector('#reset-2fa-otp-card .otp-cell').focus();
+          startResetOtpCountdown(verifyResult.data.otpExpireSeconds || 60);
+        }
+      } catch (err) {
+        showToast('Đã có lỗi xảy ra, vui lòng thử lại');
+      } finally {
+        hideLoading();
+      }
+    });
+
+    $("#reset-2fa-otp-card .otp-inputs").on("input", ".otp-cell", function () {
+      this.value = this.value.replace(/[^0-9]/g, '').slice(-1);
+      var next = $(this).next('.otp-cell');
+      if (this.value && next.length) next.focus();
+    });
+
+    $("#reset-2fa-otp-card .otp-inputs").on("keydown", ".otp-cell", function (e) {
+      if (e.key === 'Backspace' && !this.value) {
+        $(this).prev('.otp-cell').focus();
+      }
+    });
+
+    $("#reset-2fa-otp-card .otp-inputs").on("paste", ".otp-cell", function (e) {
+      e.preventDefault();
+      var paste = (e.originalEvent.clipboardData || window.clipboardData)
+        .getData('text').replace(/[^0-9]/g, '').slice(0, 6);
+      var cells = $('#reset-2fa-otp-card .otp-cell');
+      paste.split('').forEach(function (d, i) { cells.eq(i).val(d); });
+      cells.eq(Math.min(paste.length, 5)).focus();
+    });
+
+    function backToLoginFromReset2FAOtp() {
+      clearInterval(_resetOtpCountdownTimer);
+      document.getElementById('reset-2fa-otp-card').setAttribute('hidden', '');
+      document.getElementById('reset-2fa-otp-form').reset();
+      $('#login-card').show();
+    }
+
+    document.getElementById('reset-2fa-otp-back-arrow').addEventListener('click', function (event) {
+      event.preventDefault();
+      backToLoginFromReset2FAOtp();
+    });
+
+    document.getElementById('reset-2fa-otp-resend-link').addEventListener('click', async function (event) {
+      event.preventDefault();
+      var otpErrEl = document.getElementById('reset-2fa-otp-error');
+      otpErrEl.hidden = true; otpErrEl.textContent = '';
+
+      showLoading();
+      try {
+        var resendResult = await resendOTP(_reset2FAResetToken);
+        if (resendResult.code !== '00') {
+          otpErrEl.textContent = resendResult.message;
+          otpErrEl.hidden = false;
+        } else {
+          if (resendResult.data && resendResult.data.resetToken) {
+            _reset2FAResetToken = resendResult.data.resetToken;
+          }
+          $('#reset-2fa-otp-card .otp-cell').val('');
+          document.querySelector('#reset-2fa-otp-card .otp-cell').focus();
+          startResetOtpCountdown((resendResult.data && resendResult.data.otpExpireSeconds) || 60);
+        }
+      } catch (err) {
+        showToast('Đã có lỗi xảy ra, vui lòng thử lại');
+      } finally {
+        hideLoading();
+      }
+    });
+
+    $("#reset-2fa-otp-form").on("submit", async function (event) {
+      event.preventDefault();
+      var otpErrEl = document.getElementById('reset-2fa-otp-error');
+      var code = Array.from(document.querySelectorAll('#reset-2fa-otp-card .otp-cell'))
+        .map(function (el) { return el.value; })
+        .join('');
+
+      otpErrEl.hidden = true; otpErrEl.textContent = '';
+
+      if (code.length !== 6) {
+        otpErrEl.textContent = 'Vui lòng nhập đủ 6 số mã OTP';
+        otpErrEl.hidden = false;
+        return;
+      }
+
+      showLoading();
+      try {
+        var otpResult = await verifyOTP(_reset2FAResetToken, code);
+        if (otpResult.code !== '00') {
+          otpErrEl.textContent = otpResult.message || MESSAGES.OTP_WRONG;
+          otpErrEl.hidden = false;
+        } else {
+          clearInterval(_resetOtpCountdownTimer);
+          _reset2FAResetToken = otpResult.data.resetToken;
+          if (otpResult.data && otpResult.data.qrCode) {
+            $('#qrCodeImg').attr('src', otpResult.data.qrCode);
+          }
+
+          _isReset2FAFlow = true;
+          document.getElementById('setup-2fa-title').textContent = SETUP_2FA_TITLE_RESET;
+          document.getElementById('idUser').value = _reset2FAUc;
+          // Bug fix: nếu không gán lại mật khẩu, #loginForm submit ở redirectAfter2FA()
+          // sẽ gửi j_password rỗng → OAS xác thực thất bại → redirect sai về login-failed.jsp.
+          document.getElementById('idPassword').value = _reset2FAPwd;
+
+          document.getElementById('reset-2fa-otp-card').setAttribute('hidden', '');
+          document.getElementById('setup-2fa-card').removeAttribute('hidden');
+        }
+      } catch (err) {
+        showToast('Đã có lỗi xảy ra, vui lòng thử lại');
+      } finally {
+        hideLoading();
+      }
+    });
+
+    var PW_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^a-zA-Z0-9]).{8,}$/;
+
+    $("#change-pw-form").on("submit", async function (event) {
+      event.preventDefault();
+      var newPw = (changeNewPwInput.value || '').trim();
+      var confirmPw = (changeConfirmPwInput.value || '').trim();
+      var newPwErr = document.getElementById('change-new-pw-error');
+      var confirmPwErr = document.getElementById('change-confirm-pw-error');
+
+      newPwErr.hidden = true; newPwErr.textContent = '';
+      confirmPwErr.hidden = true; confirmPwErr.textContent = '';
+      changeNewPwInput.classList.remove('input-error');
+      changeConfirmPwInput.classList.remove('input-error');
+
+      var isValid = true;
+      if (!newPw) {
+        newPwErr.textContent = MESSAGES.CHANGE_PW_EMPTY; newPwErr.hidden = false;    // #5
+        changeNewPwInput.classList.add('input-error'); isValid = false;
+      } else if (!PW_REGEX.test(newPw)) {
+        newPwErr.textContent = MESSAGES.CHANGE_PW_POLICY; newPwErr.hidden = false;   // #6
+        changeNewPwInput.classList.add('input-error'); isValid = false;
+      }
+      if (!confirmPw) {
+        confirmPwErr.textContent = MESSAGES.CHANGE_PW_CONFIRM_EMPTY; confirmPwErr.hidden = false;
+        changeConfirmPwInput.classList.add('input-error'); isValid = false;
+      } else if (confirmPw !== newPw) {
+        confirmPwErr.textContent = MESSAGES.CHANGE_PW_MISMATCH; confirmPwErr.hidden = false; // #7
+        changeConfirmPwInput.classList.add('input-error'); isValid = false;
+      }
+      if (!isValid) return;
+
+      var oldPwd = document.getElementById('idPassword').value;
+      showLoading();
+      try {
+        try {
+          await changePassword(_pendingUc, oldPwd, newPw);
+        } catch (e) {
+          console.warn('changePassword lỗi, tạm bỏ qua:', e);
+        }
+
+        // [FaceID] Luồng Face ID: đổi mật khẩu xong → VÀO THẲNG, KHÔNG thiết lập 2FA (spec 10.5.2).
+        if (_faceIdFlow) {
+          showToast(MESSAGES.CHANGE_PW_SUCCESS, 'success');   // #8
+          // Đã đăng nhập bằng Face ID rồi đổi mật khẩu → cập nhật lại credential đã lưu
+          // (im lặng, không cần quét lại) để Face ID lần sau dùng mật khẩu mới.
+          if (window.ReactNativeWebView) {
+            _sendNative('setup_sinhtrachoc', { username: document.getElementById('idUser').value, password: newPw });
+          }
+          document.getElementById('change-pw-card').setAttribute('hidden', '');
+          redirectAfter2FA();
+          return;
+        }
+
+        // Luồng thường: đổi mật khẩu thành công → chuyển sang setup 2FA
+        // Bug fix: nếu không gán lại mật khẩu, #loginForm submit ở redirectAfter2FA()
+        // (sau khi enable2FA) sẽ gửi j_password là mật khẩu CŨ → OAS xác thực thất bại
+        // → redirect sai về login-failed.jsp.
+        document.getElementById('idPassword').value = newPw;
+
+        var result2FA = await setup2FA(_pendingUc);
+        if (result2FA.data && result2FA.data.qrCode) {
+          $('#qrCodeImg').attr('src', result2FA.data.qrCode);
+          _isReset2FAFlow = false;
+          document.getElementById('setup-2fa-title').textContent = SETUP_2FA_TITLE_DEFAULT;
+          document.getElementById('change-pw-card').setAttribute('hidden', '');
+          document.getElementById('setup-2fa-card').removeAttribute('hidden');
+        }
+      } catch (err) {
+        showToast('Đã có lỗi xảy ra, vui lòng thử lại');
+      } finally {
+        hideLoading();
+      }
+    });
+
+    $("#verify-2fa-form").on("submit", async function (event) {
+      event.preventDefault();
+      showLoading();
+      try {
+        await verify2FA();
+      } catch (err) {
+        showToast('Đã có lỗi xảy ra, vui lòng thử lại');
+      } finally {
+        hideLoading();
+      }
+    });
+
+    $("#verify-2fa-card .otp-inputs").on("input", ".otp-cell", function () {
+      this.value = this.value.replace(/[^0-9]/g, '').slice(-1);
+      var next = $(this).next('.otp-cell');
+      if (this.value && next.length) next.focus();
+    });
+
+    $("#verify-2fa-card .otp-inputs").on("keydown", ".otp-cell", function (e) {
+      if (e.key === 'Backspace' && !this.value) {
+        $(this).prev('.otp-cell').focus();
+      }
+    });
+
+    $("#verify-2fa-card .otp-inputs").on("paste", ".otp-cell", function (e) {
+      e.preventDefault();
+      var paste = (e.originalEvent.clipboardData || window.clipboardData)
+        .getData('text').replace(/[^0-9]/g, '').slice(0, 6);
+      var cells = $('#verify-2fa-card .otp-cell');
+      paste.split('').forEach(function (d, i) { cells.eq(i).val(d); });
+      cells.eq(Math.min(paste.length, 5)).focus();
+    });
+
+    // [AccountStatus] Đọc /auth/account-status sau khi login thành công. Chỉ hiện toast/mở popup
+    // với các cờ được yêu cầu; các cờ khác (accountExpiresAt, badPwdCount...) bỏ qua.
+    // Trả về true nếu cần DỪNG luồng (không tiếp tục sang bước 2FA/Face ID).
+    function handleAccountStatus(status, uc) {
+      // if (!status) return false;
+      // if (status.exists === false) { showToast(MESSAGES.ACC_NOT_EXIST, 'warning'); return true; }
+      // if (status.active === false) { showToast(MESSAGES.ACC_NOT_ACTIVE, 'warning'); return true; }
+      // if (status.disabled === true) { showToast(MESSAGES.ACC_DISABLED, 'warning'); return true; }
+      // if (status.locked === true) { showToast(MESSAGES.ACC_LOCKED, 'warning'); return true; }
+      // if (status.accountExpired === true) { showToast(MESSAGES.ACC_EXPIRED, 'warning'); return true; }
+      // if (status.passwordExpired === true) { showToast(MESSAGES.ACC_PWD_EXPIRED, 'warning'); return true; }
+      if (status.mustChangePassword === true) {
+        _pendingUc = uc;
+        $('#login-card').hide();
+        document.getElementById('change-pw-card').removeAttribute('hidden');
+        return true;
+      }
+      return false;
+    }
+
+    // [FaceID] Điều hướng sau khi login() thành công — dùng chung cho đăng nhập tay & Face ID.
+    // viaFaceId = true  → BỎ QUA 2FA (spec 10.5.2): vào thẳng (hoặc hỏi đổi thiết bị).
+    // viaFaceId = false → is2FAEnabled=false → setup 2FA; =true → nhập OTP verify.
+    // (Tạm comment logic đổi mật khẩu — không còn hiện change-pw-card sau login.)
+    async function handleLoginSuccess(loginResult, viaFaceId) {
+      var d = loginResult.data || {};
+      var uc = d.uc;
+      _pendingUc = uc;
+
+      // [Review] Tài khoản đánh giá store: bỏ qua 2FA và KHÔNG submit #loginForm.
+      // Đặt trước mọi nhánh khác — kể cả Face ID — vì tài khoản này chỉ có trên OAS nên
+      // is2FAEnabled=false, mà nhánh false bên dưới là "ép thiết lập 2FA bằng QR".
+      // So sánh === true để undefined ở bản IDA cũ không lọt thành truthy.
+      if (d.reviewAccount === true) {
+        await preEnableBiometricThenGoToDemo(uc);
+        return;
+      }
+
+      // // [BE] backend cần trả passwordChangeRequired; tạm suy từ is2FAEnabled nếu chưa có.
+      // var pwChange = (typeof d.passwordChangeRequired !== 'undefined')
+      //   ? d.passwordChangeRequired
+      //   : (!d.is2FAEnabled);
+
+      if (viaFaceId) {
+        // if (pwChange) {
+        //   _faceIdFlow = true;                          // để change-pw handler bỏ qua setup 2FA
+        //   $('#login-card').hide();
+        //   document.getElementById('change-pw-card').removeAttribute('hidden');
+        // } else
+        if (d.otherDeviceLoggedIn) {            // [BE] #13: đang đăng nhập thiết bị khác
+          showConfirmModal(
+            MESSAGES.OTHER_DEVICE_TITLE, MESSAGES.OTHER_DEVICE_BODY,
+            MESSAGES.OTHER_DEVICE_OK, MESSAGES.OTHER_DEVICE_CANCEL,
+            async function () {                        // Tiếp tục đăng nhập → đăng xuất máy cũ
+              showLoading();
+              try { await forceLoginNewDevice(uc); } catch (e) { /* ignore */ } finally { hideLoading(); }
+              redirectAfter2FA();
+            },
+            function () { /* Hủy → ở lại 1018.MH01 */ }
+          );
+        } else {
+          redirectAfter2FA();                          // vào thẳng, không 2FA
+        }
+        return;
+      }
+
+      // ----- Luồng đăng nhập tay -----
+      var skip2FA = window.location.href.includes('skip2FA');
+      var userName = $('#idUser').val();
+      var BY_PASS_USER = [
+        'weblogic', 'devoas', 'devstc', 'devptc', 'ioc_btc', 
+        'ioc_stc', 'ioc_ptc', 'khotc-qt1', 'odi_uat_ioc1', 
+        'csdl_btc', 'csdl_stc', 'csdl_ptc', 'khotc-qt2', 
+        'odi_uat_qg1', 'luyenttt', 'stchanoi1', 'ptchoaiduc', 
+        'phuonglang1', 'nguyenthuha1'];
+      if (skip2FA || BY_PASS_USER.includes(userName)) {
+        redirectAfter2FA();
+      // } else if (pwChange) {
+      //   $('#login-card').hide();
+      //   document.getElementById('change-pw-card').removeAttribute('hidden');
+      } else if (!d.is2FAEnabled) {
+        // Chưa bật 2FA → gọi setup-2fa, hiện card QR ngay (bỏ bước đổi mật khẩu).
+        var result2FA = await setup2FA(uc);
+        if (result2FA.data && result2FA.data.qrCode) {
+          $('#qrCodeImg').attr('src', result2FA.data.qrCode);
+          _isReset2FAFlow = false;
+          document.getElementById('setup-2fa-title').textContent = SETUP_2FA_TITLE_DEFAULT;
+          $('#login-card').hide();
+          document.getElementById('setup-2fa-card').removeAttribute('hidden');
+        } else {
+          showToast((result2FA && result2FA.message) || 'Không thể thiết lập xác thực hai lớp. Vui lòng thử lại');
+        }
+      } else {
+        $('#login-card').hide();
+        document.getElementById('verify-2fa-card').removeAttribute('hidden');
+        document.querySelector('#verify-2fa-card .otp-cell').focus();
+        startOtpCountdown();
+      }
+    }
+
+    $("#loginBtn").on("click", async function (event) {
+      // [FaceID] Đọc & reset cờ ngay đầu handler để lần click thủ công sau không bị "dính" cờ.
+      var viaFaceId = !!window.__faceIdLogin;
+      window.__faceIdLogin = false;
+
+      $('#idUser').val($.trim($('#idUser').val().toLowerCase()));
+      $('#idPassword').val($.trim($('#idPassword').val()));
+
+      const idUser = $('#idUser').val();
+      const idPassword = $('#idPassword').val();
+
+      var contentErr = '';
+      if (idUser === '') { contentErr = 'Tên đăng nhập'; }
+      if (idPassword === '') { contentErr = contentErr != '' ? contentErr + ', mật khẩu' : 'Mật khẩu'; }
+
+      if (contentErr != '') {
+        // Với luồng Face ID, creds rỗng nghĩa là chưa lưu → không hiện lỗi "để trống".
+        if (!viaFaceId) showModalMessage(contentErr + ' không được để trống!');
+        return false;
+      }
+
+      localStorage.setItem("username", idUser);
+
+      showLoading();
+      try {
+        // [FaceID] Face ID có thể đã bị TẮT cho tài khoản này từ BE (trang chủ / gọi thẳng
+        // API change-status) mà thiết bị chưa được báo → hỏi lại BE trước khi dùng creds cũ.
+        if (viaFaceId) {
+          const stillEnabled = await isFaceIdEnabledOnServer(idUser);
+          if (!stillEnabled) {
+            _sendNative('remove_token-by-sinhtrachoc');
+            showToast(MESSAGES.FID_DISABLED, 'warning');
+            return;
+          }
+        }
+
+        const loginResult = await login();
+        if (loginResult.code !== '00') {
+          if (viaFaceId) {
+            // Creds Face ID đã lưu không còn hợp lệ (mật khẩu đã đổi/reset/hết hạn ở nơi khác)
+            // → XÓA credential cũ trên thiết bị để không lặp lỗi, và yêu cầu bật lại Face ID.
+            _sendNative('remove_token-by-sinhtrachoc');
+            showToast(MESSAGES.FID_STALE, 'warning');
+          } else {
+            var loginErrEl = document.getElementById('login-error');
+            if (loginErrEl) { loginErrEl.textContent = loginResult.message || MESSAGES.LOGIN_WRONG; loginErrEl.hidden = false; }
+            document.getElementById('idUser').classList.add('input-error');
+            document.getElementById('idPassword').classList.add('input-error');
+          }
+          return;
+        }
+
+        var loginUc = (loginResult.data && loginResult.data.uc) || idUser;
+
+        // [AccountStatus] Kiểm tra trạng thái tài khoản ngay sau khi login thành công.
+        // Fail-open: lỗi/timeout gọi API thì bỏ qua, không chặn luồng đăng nhập.
+        try {
+          var accountStatusRes = await getAccountStatus(loginUc);
+          if (accountStatusRes && accountStatusRes.data && handleAccountStatus(accountStatusRes.data, loginUc)) {
+            return;
+          }
+        } catch (e) {
+          console.warn('getAccountStatus lỗi, tạm bỏ qua:', e);
+        }
+
+        // [AccountStatus] Lấy is2FAEnabled mới nhất để quyết định luồng setup/verify 2FA.
+        try {
+          var authStatusRes = await getAuthStatus(loginUc);
+          if (authStatusRes && authStatusRes.data) {
+            loginResult.data = loginResult.data || {};
+            loginResult.data.is2FAEnabled = authStatusRes.data.is2FAEnabled;
+            // Kiểm typeof: bản IDA cũ chưa có field, không được ghi đè giá trị đã lấy từ
+            // /auth/login bằng undefined.
+            if (typeof authStatusRes.data.reviewAccount !== 'undefined') {
+              loginResult.data.reviewAccount = authStatusRes.data.reviewAccount;
+            }
+          }
+        } catch (e) {
+          console.warn('getAuthStatus lỗi, tạm bỏ qua:', e);
+        }
+
+        // Không tự lưu/không hỏi bật Face ID ở trang login nữa.
+        // Việc BẬT/TẮT Face ID do người dùng chủ động qua nút gạt ở TRANG CHỦ (user.js + faceid-bridge.js).
+        await handleLoginSuccess(loginResult, viaFaceId);
+      } catch (err) {
+        showToast('Đã có lỗi xảy ra, vui lòng thử lại');
+      } finally {
+        hideLoading();
+      }
+    });
+
+    // [Cleanup 2026-08-05] Đã xoá handler legacy #loginBtn2 (GET /mailapi/checkmail):
+    // #loginBtn2 và #idPin không còn tồn tại trong login.jsp nên handler không bao giờ chạy;
+    // context /mailapi cũng không còn được OHS map (probe qua tên miền → 404).
+    // Xác thực OTP 2FA hiện đi qua verify2FA() → /auth/verify-2fa.
+
+    // [FaceID] Nút "Đăng nhập bằng Face ID" — chỉ gửi yêu cầu; window.khons đã định nghĩa 1 lần ở trên.
+    $(".touch-id-Icons").on("click", function (event) {
+      if (event && event.preventDefault) event.preventDefault();   // <a href="#">
+      if (window.ReactNativeWebView) {
+        // Gửi kèm tài khoản đang gõ (trim + lowercase, khớp chuẩn hoá lúc đăng nhập)
+        // để native chặn nếu Face ID đang gắn tài khoản KHÁC → tránh đăng nhập nhầm.
+        var typedUser = ($.trim($('#idUser').val() || '')).toLowerCase();
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          result: 'OK', data: { action: "finger_login", username: typedUser }
+        }));
+      } else {
+        // Mở ngoài app (trình duyệt web thường) → không hỗ trợ Face ID.
+        showToast(MESSAGES.FID_NO_SUPPORT, 'warning');
+      }
+    });
+
+    // [FaceID] Thiết lập/bật Face ID (nếu login.jsp có phần tử .touch-id-setUp).
+    $(".touch-id-setUp").on("click", function (event) {
+      if (event && event.preventDefault) event.preventDefault();
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          result: 'OK', data: { action: "setup_fingerprint" }
+        }));
+      }
+    });
+
+  }
+
+  var langParam = getParameter('lang');
+
+  if (langParam === undefined || langParam == '') {
+    langParam = window.navigator.userLanguage || window.navigator.language;
+  }
+  var langAbbr = [
+    "en", "hr", "ro", "da", "it", "tr", "no", "ko", "cs", "de",
+    "zh-CN", "zh-TW", "el", "fi", "pl", "pt-PT", "pt", "sv", "fr", "ru",
+    "fr-CA", "es", "ja", "ar", "he", "hu", "nl", "sk", "th"
+  ];
+
+  var langParamExact = "";
+  var langParamShort = "";
+  var langParamLocale = "";
+  for (var i = 0; i < langAbbr.length; i++) {
+    var sLangAbbr = langAbbr[i];
+    if ((typeof sLangAbbr === 'string') && (sLangAbbr !== "")) {
+      if (sLangAbbr === langParam) {
+        langParamExact = sLangAbbr;
+        break;
+      } else if (langParam.indexOf(sLangAbbr) == 0) {
+        langParamShort = sLangAbbr;
+      } else if (langParam.indexOf(sLangAbbr.substring(0, 2)) == 0) {
+        langParamLocale = sLangAbbr;
+      }
+    }
+  }
+
+  if ((typeof langParamExact === 'string') && (langParamExact !== langParam)) {
+    if ((typeof langParamLocale === 'string') && (langParamLocale !== "")) {
+      langParam = langParamLocale;
+    }
+    if ((typeof langParamShort === 'string') && (langParamShort !== "")) {
+      langParam = langParamShort;
+    }
+  }
+
+  if (langParamExact === "" && langParamShort === "" && langParamLocale === "") {
+    langParam = 'en';
+  }
+
+  var messagePath = 'nls/' + langParam + '/messages';
+
+  //NOTE: require.js MUST BE LOADED IN PAGE ALREADY
+  require(['jquery',
+    'knockout',
+    'js/useragent',
+    'js/languages',
+    'js/responsiveutils-definitions',
+    messagePath,
+    'ojs/ojcore',
+    'ojs/ojknockout',
+    'ojs/ojswitch',
+    'ojs/ojselectcombobox'
+  ],
+    function ($, ko, useragent, languages, rudef, messages) {
+      //Validate login page has a root container
+      if (elContainer === null || elContainer === undefined) {
+        elContainer = document.body;
+      }
+
+      //Inject CSS into HTML container
+      var bIsTouchLayout = useragent.userAgent.is_touchdevice;
+      var eScreenSize = rudef.getScreenSize();
+      rudef.setResponsiveUtilsClasses(elContainer, bIsTouchLayout, eScreenSize);
+
+      //Add in screen size change listener
+      if (!(window.matchMedia === null || window.matchMedia === undefined)) {
+        var fUpdateResponsiveUtilsClasses = function () {
+          if ($(".bitech-rootlogin").length > 0) {
+            var eNewScreenSize = rudef.getScreenSize();
+            rudef.setResponsiveUtilsClasses(elContainer, bIsTouchLayout, eNewScreenSize);
+          }
+        };
+        var aaMediaQueries = rudef.SCREEN_SIZE_QUERY;
+        for (var sSizeType in aaMediaQueries) {
+          var sQuery = aaMediaQueries[sSizeType];
+          var oSizeMatch = window.matchMedia(sQuery);
+          oSizeMatch.addListener(fUpdateResponsiveUtilsClasses);
+        }
+      }
+
+      function switchLangParam(paramName, paramValue) {
+        var url = window.location.href;
+        var hash = location.hash;
+        url = url.replace(hash, '');
+        if (url.indexOf(paramName + "=") >= 0) {
+          var prefix = url.substring(0, url.indexOf(paramName));
+          var suffix = url.substring(url.indexOf(paramName));
+          suffix = suffix.substring(suffix.indexOf("=") + 1);
+          suffix = (suffix.indexOf("&") >= 0) ? suffix.substring(suffix.indexOf("&")) : "";
+          url = prefix + paramName + "=" + paramValue + suffix;
+        } else {
+          if (url.indexOf("?") < 0)
+            url += "?" + paramName + "=" + paramValue;
+          else
+            url += "&" + paramName + "=" + paramValue;
+        }
+        window.location.href = url + hash;
+      }
+
+      //Render the login page content
+      var oLoginMessages = messages.login;
+      var oLanguageOptions = languages.generateLanguageOptions();
+
+      this.optionChangedHandler = function (event, data) {
+        if (data.option == "value") {
+          var selectedVal = data.value;
+          switchLangParam('lang', selectedVal);
+        }
+      }
+
+      var redirectURL = getParameter("redirect");
+      var displaysikey = getParameter("msi");
+      if (displaysikey != 'undefined' && displaysikey == 'true') {
+        displaysikey = 'block';
+      } else {
+        displaysikey = 'none';
+      }
+
+      _renderLoginPage(elContainer, bIsTouchLayout, oLoginMessages, oLanguageOptions, redirectURL, displaysikey);
+
+      function SwitchModel() {
+        this.isChecked = ko.observable();
+      }
+
+      function ValueModel() { }
+    });
+};

@@ -1,0 +1,15 @@
+2026/07/09-08:51:09.210 701c Reusing MANIFEST D:\Du_an_mini\auto_tich\chrome_debug_profile\Default\WebStorage\6\IndexedDB\indexeddb.leveldb/MANIFEST-000001
+2026/07/09-08:51:09.210 701c Recovering log #4
+2026/07/09-08:51:09.214 701c Reusing old log D:\Du_an_mini\auto_tich\chrome_debug_profile\Default\WebStorage\6\IndexedDB\indexeddb.leveldb/000004.log 
+2026/07/09-08:51:13.766 726c Level-0 table #8: started
+2026/07/09-08:51:13.770 726c Level-0 table #8: 441874 bytes OK
+2026/07/09-08:51:13.771 726c Delete type=0 #4
+2026/07/09-08:51:13.771 726c Manual compaction at level-0 from (begin) .. (end); will stop at (end)
+2026/07/09-08:51:13.771 41f4 Manual compaction at level-1 from (begin) .. (end); will stop at '\x00\x03\x00\x00\xc8\x0b\x00S\x00W\x00H\x00e\x00a\x00l\x00t\x00h\x00L\x00o\x00g' @ 576 : 1
+2026/07/09-08:51:13.772 41f4 Compacting 1@1 + 1@2 files
+2026/07/09-08:51:13.774 41f4 Generated table #9@1: 85 keys, 6833 bytes
+2026/07/09-08:51:13.774 41f4 Compacted 1@1 + 1@2 files => 6833 bytes
+2026/07/09-08:51:13.775 41f4 compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/07/09-08:51:13.775 41f4 Delete type=2 #5
+2026/07/09-08:51:13.775 41f4 Delete type=2 #8
+2026/07/09-08:51:13.776 726c Manual compaction at level-1 from '\x00\x03\x00\x00\xc8\x0b\x00S\x00W\x00H\x00e\x00a\x00l\x00t\x00h\x00L\x00o\x00g' @ 576 : 1 .. (end); will stop at (end)

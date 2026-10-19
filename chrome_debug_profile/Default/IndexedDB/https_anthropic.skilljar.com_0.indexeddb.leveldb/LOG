@@ -1,0 +1,14 @@
+2026/10/15-17:23:39.567 1ef0 Reusing MANIFEST D:\Du_an_mini\auto_tich\chrome_debug_profile\Default\IndexedDB\https_anthropic.skilljar.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/10/15-17:23:39.573 1ef0 Recovering log #20617
+2026/10/15-17:23:39.573 1ef0 Reusing old log D:\Du_an_mini\auto_tich\chrome_debug_profile\Default\IndexedDB\https_anthropic.skilljar.com_0.indexeddb.leveldb/020617.log 
+2026/10/15-17:23:39.574 1ef0 Delete type=2 #20615
+2026/10/15-17:23:39.625 1ef0 Level-0 table #20622: started
+2026/10/15-17:23:39.626 1ef0 Level-0 table #20622: 609 bytes OK
+2026/10/15-17:23:39.627 1ef0 Delete type=0 #20617
+2026/10/15-17:23:39.628 1ef0 Manual compaction at level-0 from ' \xd1\x1f\x00\x00\x00' @ 72057594037927935 : 1 .. ' \xd2\x1f\x00\x00\x00' @ 0 : 0; will stop at ' \xd1\x1f\x00\x00\x05' @ 154745 : 1
+2026/10/15-17:23:39.628 1ef0 Compacting 1@0 + 1@1 files
+2026/10/15-17:23:39.632 1ef0 Generated table #20623@0: 1897 keys, 36679 bytes
+2026/10/15-17:23:39.632 1ef0 Compacted 1@0 + 1@1 files => 36679 bytes
+2026/10/15-17:23:39.633 1ef0 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/10/15-17:23:39.633 1ef0 Delete type=2 #20622
+2026/10/15-17:23:39.633 1ef0 Manual compaction at level-0 from ' \xd1\x1f\x00\x00\x05' @ 154745 : 1 .. ' \xd2\x1f\x00\x00\x00' @ 0 : 0; will stop at (end)

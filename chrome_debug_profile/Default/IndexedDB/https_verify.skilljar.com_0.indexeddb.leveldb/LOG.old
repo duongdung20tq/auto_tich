@@ -1,0 +1,13 @@
+2026/10/15-17:23:33.333 1ef0 Reusing MANIFEST D:\Du_an_mini\auto_tich\chrome_debug_profile\Default\IndexedDB\https_verify.skilljar.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/10/15-17:23:33.334 1ef0 Recovering log #413
+2026/10/15-17:23:33.334 1ef0 Reusing old log D:\Du_an_mini\auto_tich\chrome_debug_profile\Default\IndexedDB\https_verify.skilljar.com_0.indexeddb.leveldb/000413.log 
+2026/10/15-17:23:38.602 4f08 Level-0 table #418: started
+2026/10/15-17:23:38.604 4f08 Level-0 table #418: 802 bytes OK
+2026/10/15-17:23:38.605 4f08 Delete type=0 #413
+2026/10/15-17:23:38.606 1ef0 Manual compaction at level-0 from '\x00\x9f\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\xa0\x00\x00\x00' @ 0 : 0; will stop at '\x00\x9f\x00\x00\x05' @ 3017 : 1
+2026/10/15-17:23:38.606 1ef0 Compacting 1@0 + 1@1 files
+2026/10/15-17:23:38.607 1ef0 Generated table #419@0: 4 keys, 262 bytes
+2026/10/15-17:23:38.607 1ef0 Compacted 1@0 + 1@1 files => 262 bytes
+2026/10/15-17:23:38.607 1ef0 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/10/15-17:23:38.608 1ef0 Delete type=2 #418
+2026/10/15-17:23:38.608 1ef0 Manual compaction at level-0 from '\x00\x9f\x00\x00\x05' @ 3017 : 1 .. '\x00\xa0\x00\x00\x00' @ 0 : 0; will stop at (end)

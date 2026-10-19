@@ -1,0 +1,7 @@
+2026/10/15-15:19:51.324 4908 Reusing MANIFEST D:\Du_an_mini\auto_tich\chrome_debug_profile2\Default\IndexedDB\https_accounts.skilljar.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/10/15-15:19:51.325 4908 Recovering log #3
+2026/10/15-15:19:51.325 4908 Reusing old log D:\Du_an_mini\auto_tich\chrome_debug_profile2\Default\IndexedDB\https_accounts.skilljar.com_0.indexeddb.leveldb/000003.log 
+2026/10/15-15:19:55.522 6358 Level-0 table #5: started
+2026/10/15-15:19:55.525 6358 Level-0 table #5: 841 bytes OK
+2026/10/15-15:19:55.527 6358 Delete type=0 #3
+2026/10/15-15:19:55.528 4908 Manual compaction at level-0 from '\x00\x02\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x03\x00\x00\x00' @ 0 : 0; will stop at (end)

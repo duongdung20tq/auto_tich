@@ -1,0 +1,21 @@
+2026/10/14-16:06:04.459 54c4 Reusing MANIFEST D:\Du_an_mini\auto_tich\chrome_debug_profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/10/14-16:06:04.461 54c4 Recovering log #709
+2026/10/14-16:06:04.462 54c4 Reusing old log D:\Du_an_mini\auto_tich\chrome_debug_profile\Default\Local Storage\leveldb/000709.log 
+2026/10/14-17:10:29.297 1090 Level-0 table #713: started
+2026/10/14-17:10:29.300 1090 Level-0 table #713: 25426 bytes OK
+2026/10/14-17:10:29.301 1090 Delete type=0 #709
+2026/10/14-17:16:43.436 1090 Level-0 table #715: started
+2026/10/14-17:16:43.439 1090 Level-0 table #715: 29685 bytes OK
+2026/10/14-17:16:43.440 1090 Delete type=0 #712
+2026/10/14-17:16:43.440 1090 Compacting 4@0 + 1@1 files
+2026/10/14-17:16:43.448 1090 Generated table #716@0: 1330 keys, 422271 bytes
+2026/10/14-17:16:43.448 1090 Compacted 4@0 + 1@1 files => 422271 bytes
+2026/10/14-17:16:43.448 1090 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/10/14-17:16:43.449 1090 Delete type=2 #706
+2026/10/14-17:16:43.449 1090 Delete type=2 #708
+2026/10/14-17:16:43.449 1090 Delete type=2 #710
+2026/10/14-17:16:43.449 1090 Delete type=2 #713
+2026/10/14-17:16:43.449 1090 Delete type=2 #715
+2026/10/15-09:07:29.039 1090 Level-0 table #718: started
+2026/10/15-09:07:29.043 1090 Level-0 table #718: 30291 bytes OK
+2026/10/15-09:07:29.045 1090 Delete type=0 #714

@@ -1,0 +1,5 @@
+2026/10/15-17:34:47.046 4908 Reusing MANIFEST D:\Du_an_mini\auto_tich\chrome_debug_profile2\Default\IndexedDB\https_anthropic.skilljar.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/10/15-17:34:47.046 4908 Recovering log #1464
+2026/10/15-17:34:47.046 4908 Reusing old log D:\Du_an_mini\auto_tich\chrome_debug_profile2\Default\IndexedDB\https_anthropic.skilljar.com_0.indexeddb.leveldb/001464.log 
+2026/10/15-17:34:47.046 4908 Delete type=2 #1462
+2026/10/15-17:34:48.560 6358 Manual compaction at level-0 from ' G\x02\x00\x00\x00' @ 72057594037927935 : 1 .. ' H\x02\x00\x00\x00' @ 0 : 0; will stop at (end)
